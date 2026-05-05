@@ -1,5 +1,6 @@
 package io.openur.domain.userchallenge.repository;
 
+import io.openur.domain.userchallenge.dto.ChallengeRow;
 import io.openur.domain.userchallenge.model.UserChallenge;
 import java.util.List;
 import java.util.Map;
@@ -23,13 +24,15 @@ public interface UserChallengeRepository {
 
     /**
      * Updates completion status after NFT airdrop
-     * @param completedChallenges List of challenges that have been completed and had NFT airdropped
+     * @param completedUserChallengeIds List of challenges that have been completed and had NFT airdropped
      */
     void bulkUpdateCompletedChallenges(List<Long> completedUserChallengeIds);
 
     void markNftCompleted(Long userChallengeId);
 
-    Page<UserChallenge> findUncompletedChallengesByUserId(
+    boolean existsByUserId(String userId);
+
+    Page<ChallengeRow> findUncompletedChallengesByUserId(
         String userId, Pageable pageable
     );
 
@@ -37,7 +40,7 @@ public interface UserChallengeRepository {
         String userId, Pageable pageable
     );
 
-    Page<UserChallenge> findRepetitiveChallengesByUserId(
+    Page<ChallengeRow> findRepetitiveChallengesByUserId(
         String userId, Pageable pageable
     );
 
@@ -50,4 +53,4 @@ public interface UserChallengeRepository {
     List<UserChallenge> findAllBySimpleRepetitiveChallenge(String userId);
 
     void delete(UserChallenge userChallenge);
-} 
+}

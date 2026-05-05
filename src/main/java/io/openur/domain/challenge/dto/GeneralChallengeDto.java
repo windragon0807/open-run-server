@@ -4,7 +4,6 @@ import io.openur.domain.challenge.enums.ChallengeType;
 import io.openur.domain.challenge.enums.CompletedType;
 import io.openur.domain.challenge.model.Challenge;
 import io.openur.domain.challenge.model.ChallengeStage;
-import io.openur.domain.user.model.User;
 import io.openur.domain.userchallenge.model.UserChallenge;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -34,14 +33,21 @@ public class GeneralChallengeDto {
     private boolean nftCompleted;
 
     public GeneralChallengeDto(UserChallenge userChallenge) {
-        this.userChallengeId = userChallenge.getUserChallengeId();
-        this.currentCount = userChallenge.getCurrentCount();
-        this.completedDate = userChallenge.getCompletedDate();
-        this.accomplished = userChallenge.getCompletedDate() != null;
-        this.nftCompleted = userChallenge.getNftCompleted();
-        this.progressStat = userChallenge.getCurrentProgress();
+        this(userChallenge.getChallengeStage(), userChallenge);
+    }
 
-        ChallengeStage challengeStage = userChallenge.getChallengeStage();
+    public GeneralChallengeDto(ChallengeStage challengeStage, UserChallenge userChallenge) {
+        if (userChallenge != null) {
+            this.userChallengeId = userChallenge.getUserChallengeId();
+            this.currentCount = userChallenge.getCurrentCount();
+            this.completedDate = userChallenge.getCompletedDate();
+            this.accomplished = userChallenge.getCompletedDate() != null;
+            this.nftCompleted = userChallenge.getNftCompleted();
+            this.progressStat = userChallenge.getCurrentProgress();
+        } else {
+            this.currentCount = 0;
+        }
+
         this.conditionCount = challengeStage.getConditionAsCount();
         this.stageCount = challengeStage.getStageNumber();
 
@@ -49,7 +55,6 @@ public class GeneralChallengeDto {
         this.challengeId = challenge.getChallengeId();
         this.challengeName = challenge.getChallengeName();
         this.challengeDescription = challenge.getChallengeDescription();
-//        this.conditionCount = challenge.getCompletedConditionCount();
         this.completedType = challenge.getCompletedType();
         this.conditionDate = challenge.getCompletedConditionDate();
         this.conditionText = challenge.getCompletedConditionText();
@@ -73,12 +78,6 @@ public class GeneralChallengeDto {
     @RequiredArgsConstructor
     public static class OnIssue {
         private final UserChallenge userChallenge;
-    }
-
-    @Getter
-    @RequiredArgsConstructor
-    public static class OnUserRegistration {
-        private final User user;
     }
 
     @Getter

@@ -1,16 +1,20 @@
 package io.openur.domain.userchallenge.repository;
 
-import static com.querydsl.core.group.GroupBy.groupBy;
-import static com.querydsl.core.group.GroupBy.list;
 import static io.openur.domain.challenge.entity.QChallengeEntity.challengeEntity;
 import static io.openur.domain.challenge.entity.QChallengeStageEntity.challengeStageEntity;
 import static io.openur.domain.userchallenge.entity.QUserChallengeEntity.userChallengeEntity;
 
 import com.querydsl.core.types.dsl.BooleanExpression;
 import com.querydsl.core.types.dsl.Expressions;
+import com.querydsl.jpa.JPAExpressions;
 import com.querydsl.jpa.impl.JPAQuery;
 import com.querydsl.jpa.impl.JPAQueryFactory;
+import io.openur.domain.challenge.entity.ChallengeStageEntity;
+import io.openur.domain.challenge.entity.QChallengeStageEntity;
 import io.openur.domain.challenge.enums.ChallengeType;
+import io.openur.domain.challenge.model.ChallengeStage;
+import io.openur.domain.userchallenge.dto.ChallengeRow;
+import io.openur.domain.userchallenge.entity.QUserChallengeEntity;
 import io.openur.domain.userchallenge.entity.UserChallengeEntity;
 import io.openur.domain.userchallenge.model.UserChallenge;
 import jakarta.persistence.EntityManager;
@@ -55,21 +59,17 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
         int batchSize = 100;
 
         for (UserChallenge userChallenge : userChallenges) {
-            // Domain → Entity 변환
             UserChallengeEntity entity = userChallenge.toEntity();
 
-            // 1. 영속성 컨텍스트에 추가
             entityManager.persist(entity);
             count++;
 
-            // 2. BATCH_SIZE마다 flush & clear
             if (count % batchSize == 0) {
-                entityManager.flush();  // DB에 쓰기
-                entityManager.clear();  // 영속성 컨텍스트 비우기 (메모리 해제)
+                entityManager.flush();
+                entityManager.clear();
             }
         }
 
-        // 3. 남은 데이터 flush
         entityManager.flush();
         entityManager.clear();
     }
@@ -124,55 +124,25 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
     }
 
     @Override
-    public Page<UserChallenge> findUncompletedChallengesByUserId(
+    public boolean existsByUserId(String userId) {
+        Integer one = queryFactory
+            .selectOne()
+            .from(userChallengeEntity)
+            .where(userChallengeEntity.userEntity.userId.eq(userId))
+            .fetchFirst();
+        return one != null;
+    }
+
+    @Override
+    public Page<ChallengeRow> findUncompletedChallengesByUserId(
         String userId,
         Pageable pageable
     ) {
-        // 2. 공통 조건 추출 (가독성 및 오류 방지)
-        BooleanExpression conditions = buildNormalUncompletedConditions(userId);
+        BooleanExpression stageIsCurrent = buildStageIsCurrentForUser(userId);
+        BooleanExpression typeFilter = challengeStageEntity.challengeEntity.challengeType
+            .notIn(ChallengeType.hidden, ChallengeType.repetitive);
 
-        // 3. Content 쿼리 (N+1 문제 방지)
-        // 보상 가능한 챌린지(currentCount >= conditionCount)를 가장 위로 정렬
-        List<UserChallengeEntity> content = queryFactory
-            .selectFrom(userChallengeEntity)
-            .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
-            .fetchJoin()
-            .leftJoin(challengeStageEntity.challengeEntity, challengeEntity)
-            .fetchJoin()
-            .where(conditions)
-            .orderBy(
-                // 보상 가능한 챌린지(0)를 먼저, 그 다음 일반 챌린지(1)를 정렬
-                Expressions.cases()
-                    .when(userChallengeEntity.currentCount.goe(challengeStageEntity.conditionAsCount))
-                    .then(0)
-                    .otherwise(1)
-                    .asc(),
-                // 각 그룹 내에서는 progress로 정렬
-                userChallengeEntity.currentProgress.desc().nullsLast()
-            )
-            .offset(pageable.getOffset())
-            .limit(pageable.getPageSize())
-            .fetch();
-
-        // 4. 빈 결과 조기 반환
-        if (content.isEmpty()) {
-            return new PageImpl<>(Collections.emptyList(), pageable, 0);
-        }
-
-        // 5. Count 쿼리
-        JPAQuery<Long> countQuery = queryFactory
-            .select(userChallengeEntity.count())
-            .from(userChallengeEntity)
-            .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
-            .leftJoin(challengeStageEntity.challengeEntity, challengeEntity)
-            .where(conditions); // 조건 재사용
-
-        // 6. 도메인 모델 매핑
-        List<UserChallenge> result = content.stream()
-            .map(UserChallenge::from)
-            .collect(Collectors.toList());
-
-        return PageableExecutionUtils.getPage(result, pageable, countQuery::fetchOne);
+        return findChallengeRowsByConditions(userId, pageable, stageIsCurrent, typeFilter);
     }
 
     @Override
@@ -180,16 +150,14 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
         String userId,
         Pageable pageable
     ) {
-        // 2. 공통 조건 추출 (가독성 및 재사용성)
         BooleanExpression conditions = buildNftIssuableConditions(userId);
 
-        // 3. Content 쿼리 (N+1 문제 해결)
         List<UserChallengeEntity> content = queryFactory
             .selectFrom(userChallengeEntity)
             .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
-            .fetchJoin() // ✅ fetchJoin 추가
+            .fetchJoin()
             .leftJoin(challengeStageEntity.challengeEntity, challengeEntity)
-            .fetchJoin()         // ✅ fetchJoin 추가
+            .fetchJoin()
             .where(conditions)
             .orderBy(
                 userChallengeEntity.completedDate.asc(),
@@ -199,18 +167,15 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
             .limit(pageable.getPageSize())
             .fetch();
 
-        // 4. 빈 결과 조기 반환
         if (content.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
 
-        // 5. Count 쿼리 (기존과 동일하게 효율적)
         JPAQuery<Long> countQuery = queryFactory
             .select(userChallengeEntity.count())
             .from(userChallengeEntity)
-            .where(conditions); // ✅ 추출된 조건 재사용
+            .where(conditions);
 
-        // 6. 도메인 모델 매핑
         List<UserChallenge> result = content.stream()
             .map(UserChallenge::from)
             .collect(Collectors.toList());
@@ -219,49 +184,70 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
     }
 
     @Override
-    public Page<UserChallenge> findRepetitiveChallengesByUserId(String userId,
-        Pageable pageable) {
-
-        // 1. 입력 검증
+    public Page<ChallengeRow> findRepetitiveChallengesByUserId(
+        String userId,
+        Pageable pageable
+    ) {
         if (!StringUtils.hasText(userId)) {
             return Page.empty(pageable);
         }
 
-        // 2. 공통 조건 추출
-        BooleanExpression conditions = buildRepetitiveUncompletedConditions(userId);
+        BooleanExpression stageIsCurrent = buildStageIsCurrentForUser(userId);
+        BooleanExpression typeFilter = challengeStageEntity.challengeEntity.challengeType
+            .eq(ChallengeType.repetitive);
 
-        // 3. Content 쿼리 (N+1 문제 방지)
-        List<UserChallengeEntity> content = queryFactory
-            .selectFrom(userChallengeEntity)
-            .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
+        return findChallengeRowsByConditions(userId, pageable, stageIsCurrent, typeFilter);
+    }
+
+    private Page<ChallengeRow> findChallengeRowsByConditions(
+        String userId,
+        Pageable pageable,
+        BooleanExpression stageIsCurrent,
+        BooleanExpression typeFilter
+    ) {
+        List<ChallengeStageEntity> stages = queryFactory
+            .selectFrom(challengeStageEntity)
+            .distinct()
+            .innerJoin(challengeStageEntity.challengeEntity, challengeEntity)
             .fetchJoin()
-            .leftJoin(challengeStageEntity.challengeEntity, challengeEntity)
-            .fetchJoin()
-            .where(conditions)
+            .leftJoin(userChallengeEntity)
+            .on(
+                userChallengeEntity.challengeStageEntity.stageId.eq(challengeStageEntity.stageId),
+                userChallengeEntity.userEntity.userId.eq(userId)
+            )
+            .where(stageIsCurrent, typeFilter)
             .orderBy(
-                userChallengeEntity.currentProgress.desc().nullsLast(),
-                userChallengeEntity.userChallengeId.asc() // 2차 정렬로 순서 보장
+                Expressions.cases()
+                    .when(userChallengeEntity.currentCount.coalesce(0)
+                        .goe(challengeStageEntity.conditionAsCount))
+                    .then(0).otherwise(1).asc(),
+                userChallengeEntity.currentProgress.coalesce(0.0f).desc(),
+                challengeStageEntity.challengeEntity.challengeId.asc(),
+                challengeStageEntity.stageId.asc()
             )
             .offset(pageable.getOffset())
             .limit(pageable.getPageSize())
             .fetch();
 
-        // 4. 빈 결과 조기 반환
-        if (content.isEmpty()) {
+        if (stages.isEmpty()) {
             return new PageImpl<>(Collections.emptyList(), pageable, 0);
         }
 
-        // 5. Count 쿼리 수정 (✅ Join 추가)
-        JPAQuery<Long> countQuery = queryFactory
-            .select(userChallengeEntity.count())
-            .from(userChallengeEntity)
-            .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
-            .leftJoin(challengeStageEntity.challengeEntity, challengeEntity) // ✅ 조건절에서 참조하므로 필수
-            .where(conditions);
+        Map<Long, UserChallengeEntity> ucByStageId = fetchUserChallengeMap(userId, stages);
 
-        // 6. 도메인 모델 매핑
-        List<UserChallenge> result = content.stream()
-            .map(UserChallenge::from)
+        JPAQuery<Long> countQuery = queryFactory
+            .select(challengeStageEntity.countDistinct())
+            .from(challengeStageEntity)
+            .innerJoin(challengeStageEntity.challengeEntity, challengeEntity)
+            .where(stageIsCurrent, typeFilter);
+
+        List<ChallengeRow> result = stages.stream()
+            .map(stage -> new ChallengeRow(
+                ChallengeStage.from(stage),
+                Optional.ofNullable(ucByStageId.get(stage.getStageId()))
+                    .map(UserChallenge::from)
+                    .orElse(null)
+            ))
             .collect(Collectors.toList());
 
         return PageableExecutionUtils.getPage(result, pageable, countQuery::fetchOne);
@@ -272,26 +258,23 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
         String userId,
         Long challengeId
     ) {
-        // 2. fetchJoin으로 N+1 문제 해결
         List<UserChallengeEntity> entities = queryFactory
             .selectFrom(userChallengeEntity)
             .leftJoin(userChallengeEntity.challengeStageEntity, challengeStageEntity)
-            .fetchJoin() // ✅ fetchJoin 추가
+            .fetchJoin()
             .leftJoin(challengeStageEntity.challengeEntity, challengeEntity)
-            .fetchJoin()         // ✅ fetchJoin 추가
+            .fetchJoin()
             .where(
                 userChallengeEntity.userEntity.userId.eq(userId),
-                challengeEntity.challengeId.eq(challengeId), // ✅ challengeId 필터 추가
+                challengeEntity.challengeId.eq(challengeId),
                 userChallengeEntity.nftCompleted.isFalse()
             )
             .fetch();
 
-        // 3. 빈 결과 조기 반환
         if (entities.isEmpty()) {
             return Collections.emptyMap();
         }
 
-        // 4. Map 변환
         return entities.stream()
             .map(UserChallenge::from)
             .collect(Collectors.toMap(
@@ -343,28 +326,76 @@ public class UserChallengeRepositoryImpl implements UserChallengeRepository {
         userChallengeJpaRepository.delete(userChallenge.toEntity());
     }
 
-    private BooleanExpression buildNormalUncompletedConditions(String userId) {
-        return userChallengeEntity.userEntity.userId.eq(userId)
-            .and(userChallengeEntity.completedDate.isNull()) // ✅ 미완료 조건 (isNull)
-            .and(challengeEntity.challengeType.notIn(        // ✅ notIn으로 명확하게 처리
-                ChallengeType.hidden,
-                ChallengeType.repetitive
+    /**
+     * "표시할 stage" 결정 규칙:
+     * (A) 해당 user의 미완료 user_challenge가 이 stage에 있으면 이 stage가 표시 대상이다, 또는
+     * (B) 해당 user가 이 challenge에 user_challenge를 하나도 가지지 않았고 (= 신규 유저),
+     *     이 stage가 해당 challenge의 stage_number 최소값을 가진 stage이면 표시 대상이다.
+     *
+     * 결과적으로 challenge 1개당 최대 1개의 stage만 통과:
+     * - 신규 유저: stage 1
+     * - 진행 중 유저: 진행 중인 stage
+     * - 모든 stage가 완료된 challenge: 통과 안 함 (완료 탭 영역)
+     */
+    private BooleanExpression buildStageIsCurrentForUser(String userId) {
+        QUserChallengeEntity ucSub = new QUserChallengeEntity("ucSub");
+        QChallengeStageEntity stageSub = new QChallengeStageEntity("stageSub");
+        QChallengeStageEntity stageMinSub = new QChallengeStageEntity("stageMinSub");
+
+        BooleanExpression hasIncompleteOnThisStage = JPAExpressions
+            .selectOne()
+            .from(ucSub)
+            .where(
+                ucSub.challengeStageEntity.stageId.eq(challengeStageEntity.stageId),
+                ucSub.userEntity.userId.eq(userId),
+                ucSub.completedDate.isNull()
+            )
+            .exists();
+
+        BooleanExpression hasNoUcForThisChallenge = JPAExpressions
+            .selectOne()
+            .from(ucSub)
+            .join(ucSub.challengeStageEntity, stageSub)
+            .where(
+                stageSub.challengeEntity.challengeId.eq(challengeStageEntity.challengeEntity.challengeId),
+                ucSub.userEntity.userId.eq(userId)
+            )
+            .notExists();
+
+        BooleanExpression isMinStage = challengeStageEntity.stageNumber.eq(
+            JPAExpressions
+                .select(stageMinSub.stageNumber.min())
+                .from(stageMinSub)
+                .where(stageMinSub.challengeEntity.challengeId.eq(challengeStageEntity.challengeEntity.challengeId))
+        );
+
+        return hasIncompleteOnThisStage.or(hasNoUcForThisChallenge.and(isMinStage));
+    }
+
+    private Map<Long, UserChallengeEntity> fetchUserChallengeMap(
+        String userId, List<ChallengeStageEntity> stages
+    ) {
+        List<Long> stageIds = stages.stream()
+            .map(ChallengeStageEntity::getStageId)
+            .toList();
+        return queryFactory
+            .selectFrom(userChallengeEntity)
+            .where(
+                userChallengeEntity.challengeStageEntity.stageId.in(stageIds),
+                userChallengeEntity.userEntity.userId.eq(userId)
+            )
+            .fetch()
+            .stream()
+            .collect(Collectors.toMap(
+                uc -> uc.getChallengeStageEntity().getStageId(),
+                Function.identity(),
+                (a, b) -> a
             ));
     }
 
-    private BooleanExpression buildRepetitiveUncompletedConditions(String userId) {
-        return userChallengeEntity.userEntity.userId.eq(userId)
-            .and(userChallengeEntity.completedDate.isNull()) // ✅ 미완료 조건 (isNull)
-            .and(challengeEntity.challengeType.eq(ChallengeType.repetitive));
-    }
-
-    /**
-     * NFT 발급 가능한 챌린지 조회 조건 구성
-     * 비즈니스 로직을 메서드로 분리하여 가독성 향상
-     */
     private BooleanExpression buildNftIssuableConditions(String userId) {
         return userChallengeEntity.userEntity.userId.eq(userId)
-            .and(userChallengeEntity.completedDate.isNotNull()) // 완료됨
-            .and(userChallengeEntity.nftCompleted.isFalse());  // NFT 미발급
+            .and(userChallengeEntity.completedDate.isNotNull())
+            .and(userChallengeEntity.nftCompleted.isFalse());
     }
 }
